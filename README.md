@@ -79,6 +79,16 @@ cd whatsapp-mcp
 make build PROFILE=release        # target/release/wa-mcp + target/release/wa-bridge
 ```
 
+### Docker
+
+```bash
+docker build -t whatsapp-mcp https://github.com/edouard-claude/whatsapp-mcp.git
+docker run -it --rm -v wa-data:/data whatsapp-mcp pair perso --phone 33612345678
+docker run -i --rm -v wa-data:/data whatsapp-mcp serve
+```
+
+The volume keeps the WhatsApp session and the message database between runs.
+
 ### Link your WhatsApp account
 
 ```bash
