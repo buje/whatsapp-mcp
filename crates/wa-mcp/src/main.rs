@@ -15,6 +15,8 @@ mod lock;
 mod mcp;
 mod parse;
 mod query;
+#[cfg(unix)]
+mod share;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -114,7 +116,29 @@ async fn main() -> Result<()> {
         Cmd::Pair { account, .. } | Cmd::Send { account, .. } => vec![account.clone()],
         Cmd::Doctor => Vec::new(),
     };
-    let _locks = lock_accounts(&data_dir, &wanted)?;
+    let _locks = match lock_accounts(&data_dir, &wanted) {
+        Ok(locks) => locks,
+        // Compte déjà servi par une autre instance `serve` (un second hôte MCP,
+        // ou le même hôte qui en lance plusieurs) : on la rejoint plutôt que
+        // d'échouer. Voir `share`.
+        #[cfg(unix)]
+        Err(e) if is_busy(&e) && matches!(cli.cmd, Cmd::Serve { .. }) => {
+            let Cmd::Serve { read_only } = cli.cmd else {
+                unreachable!("filtré par la garde")
+            };
+            let relayed = share::relay(&data_dir, read_only).await;
+            // La lecture de stdin occupe un thread bloquant que l'arrêt du runtime
+            // attendrait jusqu'à la prochaine ligne de l'hôte : sortir tout de suite.
+            std::process::exit(match relayed {
+                Ok(()) => 0,
+                Err(relay) => {
+                    eprintln!("Error: {:#}", e.context(format!("{relay:#}")));
+                    1
+                }
+            });
+        }
+        Err(e) => return Err(e),
+    };
 
     let bridge::Bridge {
         handle,
@@ -128,6 +152,7 @@ async fn main() -> Result<()> {
         let accounts = discover(&data_dir)?;
         // Nouvelles de chaque discussion, pour les abonnements MCP.
         let (updates, _) = tokio::sync::broadcast::channel(1024);
+        let limiter = std::sync::Arc::<mcp::SendLimiter>::default();
         let server = mcp::WaServer::new(
             data_dir.clone(),
             handle.clone(),
@@ -135,8 +160,29 @@ async fn main() -> Result<()> {
             accounts.clone(),
             read_only,
             updates.clone(),
-        );
+        )
+        .with_limiter(limiter.clone());
         server.open_databases().await?;
+        // Les autres instances `serve` lancées sur ces comptes nous rejoignent ici.
+        #[cfg(unix)]
+        let sharing = if accounts.is_empty() {
+            None
+        } else {
+            match share::bind(&data_dir) {
+                Ok(listener) => Some(tokio::spawn(serve_shared(
+                    listener,
+                    data_dir.clone(),
+                    handle.clone(),
+                    store.clone(),
+                    updates.clone(),
+                    limiter.clone(),
+                ))),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "partage désactivé : les autres hôtes MCP ne pourront pas rejoindre cette instance");
+                    None
+                }
+            }
+        };
         for a in accounts {
             let h = handle.clone();
             tasks.spawn(async move {
@@ -177,6 +223,11 @@ async fn main() -> Result<()> {
             },
         };
         refresher.abort();
+        #[cfg(unix)]
+        if let Some(sharing) = sharing {
+            sharing.abort();
+            let _ = std::fs::remove_file(share::socket_path(&data_dir));
+        }
         return shutdown(handle, store, task, store_thread, result).await;
     }
 
@@ -448,6 +499,75 @@ fn doctor(data_dir: &Path, bin: &Path) -> Result<()> {
         bail!("installation incomplète");
     }
     Ok(())
+}
+
+/// Accepte les relais (voir `share`) et sert chacun avec son propre `WaServer`,
+/// au-dessus du bridge, de la base et des nouvelles de cette instance.
+#[cfg(unix)]
+async fn serve_shared(
+    listener: tokio::net::UnixListener,
+    data_dir: PathBuf,
+    handle: BridgeHandle,
+    store: Store,
+    updates: tokio::sync::broadcast::Sender<ingest::ChatUpdate>,
+    limiter: std::sync::Arc<mcp::SendLimiter>,
+) {
+    // Les connexions vivent dans ce JoinSet : quand l'instance s'arrête et
+    // abandonne cette tâche, elles tombent avec, et leurs relais sortent aussitôt.
+    let mut connections = JoinSet::new();
+    loop {
+        let stream = tokio::select! {
+            accepted = listener.accept() => accepted,
+            Some(_) = connections.join_next() => continue,
+        };
+        let stream = match stream {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                tracing::warn!(error = %e, "partage : connexion refusée");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        let (data_dir, handle, store, updates, limiter) = (
+            data_dir.clone(),
+            handle.clone(),
+            store.clone(),
+            updates.clone(),
+            limiter.clone(),
+        );
+        connections.spawn(async move {
+            let served = async {
+                let (read, write, read_only) = share::accept(stream).await?;
+                // Comptes du moment : ceux appairés depuis le démarrage compris.
+                let accounts = discover(&data_dir)?;
+                let server =
+                    mcp::WaServer::new(data_dir, handle, store, accounts, read_only, updates)
+                        .with_limiter(limiter);
+                server.open_databases().await?;
+                use rmcp::ServiceExt as _;
+                let service = server
+                    .serve((read, write))
+                    .await
+                    .context("transport partagé")?;
+                tracing::info!(read_only, "partage : un hôte MCP a rejoint cette instance");
+                let quit = service.waiting().await;
+                tracing::info!(?quit, "partage : hôte MCP parti");
+                anyhow::Ok(())
+            };
+            if let Err(e) = served.await {
+                tracing::warn!(error = %format!("{e:#}"), "partage : connexion abandonnée");
+            }
+        });
+    }
+}
+
+/// Le compte est-il tenu par une autre instance (et non illisible) ?
+#[cfg(unix)]
+fn is_busy(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<lock::LockError>(),
+        Some(lock::LockError::Busy(_))
+    )
 }
 
 fn lock_accounts(data_dir: &Path, accounts: &[AccountAlias]) -> Result<Vec<std::fs::File>> {

@@ -150,8 +150,13 @@ check each result before moving on.
 
 Things to know:
 
-- **One instance per account.** A second `wa-mcp` on the same account refuses to start
-  (per-account lock). Stop `wa-mcp pair`/`run` before the host starts `serve`.
+- **One WhatsApp session per account, shared by every host.** The first `wa-mcp serve`
+  holds the per-account lock and listens on `serve.sock` in the data directory. Any
+  later `serve` on the same account (a second host, or a host that starts several
+  instances, like Claude Desktop for its chats and for Cowork/Code sessions) joins it
+  through that socket instead of failing, with its own `--read-only` setting. On Windows,
+  or when the lock is held by `wa-mcp pair`/`run`, the second instance still refuses to
+  start: stop the terminal command first.
 - **Keep it running.** The WhatsApp session lives as long as `wa-mcp serve` runs; hosts
   that stop idle servers disconnect it. WhatsApp also unlinks devices when the phone
   itself stays offline for about 14 days.
@@ -211,7 +216,8 @@ Subscribe to `whatsapp://{account}/chat/{chat}/messages` to receive
 | `RUST_LOG` | `info` | logs on stderr |
 
 Data layout: `accounts/<alias>/session.db` (whatsmeow keys), `store.db` (messages,
-contacts, groups), `media/` (downloaded files), `lock`.
+contacts, groups), `media/` (downloaded files), `lock`; `serve.sock` at the root while a
+`serve` instance runs.
 
 ## Security and privacy
 

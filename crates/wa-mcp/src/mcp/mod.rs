@@ -26,6 +26,8 @@ use crate::domain::AccountAlias;
 use crate::query::{self, QueryError, Reader};
 use crate::store::{Op, Store};
 
+pub use write::SendLimiter;
+
 pub struct WaServer {
     reader: Reader,
     bridge: BridgeHandle,
@@ -38,7 +40,8 @@ pub struct WaServer {
     /// Verrous des comptes appairés depuis MCP (ceux du démarrage sont tenus par `main`).
     locks: parking_lot::Mutex<Vec<std::fs::File>>,
     tz: TimeZone,
-    limiter: write::SendLimiter,
+    /// Partagé entre les connexions d'une même instance : la limite vaut par compte.
+    limiter: std::sync::Arc<write::SendLimiter>,
     /// Changements de discussion diffusés par l'ingestion.
     updates: tokio::sync::broadcast::Sender<crate::ingest::ChatUpdate>,
     subs: live::SharedSubs,
@@ -68,12 +71,19 @@ impl WaServer {
             accounts: parking_lot::RwLock::new(accounts),
             locks: parking_lot::Mutex::new(Vec::new()),
             tz: TimeZone::system(),
-            limiter: write::SendLimiter::default(),
+            limiter: std::sync::Arc::default(),
             updates,
             subs: live::SharedSubs::default(),
             tool_router: tools,
             prompt_router: Self::prompt_router(),
         }
+    }
+
+    /// Fait compter les envois de ce serveur avec ceux des autres connexions
+    /// de l'instance (voir `share`).
+    pub fn with_limiter(mut self, limiter: std::sync::Arc<SendLimiter>) -> WaServer {
+        self.limiter = limiter;
+        self
     }
 
     /// Compte visé : celui demandé, ou le seul configuré.
