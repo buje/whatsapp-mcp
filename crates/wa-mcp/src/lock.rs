@@ -6,6 +6,7 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::domain::AccountAlias;
 
@@ -32,5 +33,42 @@ pub fn lock(data_dir: &Path, account: &AccountAlias) -> Result<File, LockError> 
         Ok(()) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(LockError::Busy(account.clone())),
         Err(TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Verrous pris en cours de route (appairage depuis MCP), tenus jusqu'à la fin
+/// du process. Partagés entre toutes les connexions d'une instance `serve` :
+/// la session ouverte dans le bridge survit au relais qui l'a demandée, son
+/// verrou doit donc lui survivre aussi.
+#[derive(Clone, Default)]
+pub struct Held(Arc<parking_lot::Mutex<Vec<File>>>);
+
+impl Held {
+    pub fn keep(&self, lock: File) {
+        self.0.lock().push(lock);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un compte appairé par une connexion relayée reste verrouillé quand le
+    /// relais se ferme : c'est l'instance principale qui tient son verrou.
+    #[test]
+    fn verrou_d_un_appairage_relaye_survit_au_relais() {
+        let dir = std::env::temp_dir().join(format!("wa-held-{}", std::process::id()));
+        let account: AccountAlias = "pro".parse().unwrap_or_else(|e| panic!("alias : {e}"));
+        let instance = Held::default();
+        {
+            // Ce que fait `session_pair` dans le `WaServer` d'une connexion relayée.
+            let relayed = instance.clone();
+            let lock = lock(&dir, &account).unwrap_or_else(|e| panic!("verrou : {e}"));
+            relayed.keep(lock);
+        } // le relais se ferme : son `WaServer` et sa poignée disparaissent
+        assert!(matches!(lock(&dir, &account), Err(LockError::Busy(_))));
+        drop(instance); // fin de l'instance principale
+        assert!(lock(&dir, &account).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

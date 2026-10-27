@@ -151,7 +151,7 @@ check each result before moving on.
 Things to know:
 
 - **One WhatsApp session per account, shared by every host.** The first `wa-mcp serve`
-  holds the per-account lock and listens on `serve.sock` in the data directory. Any
+  holds the per-account lock and listens on `run/serve.sock` in the data directory (a `0700` directory). Any
   later `serve` on the same account (a second host, or a host that starts several
   instances, like Claude Desktop for its chats and for Cowork/Code sessions) joins it
   through that socket instead of failing, with its own `--read-only` setting. On Windows,
@@ -216,7 +216,7 @@ Subscribe to `whatsapp://{account}/chat/{chat}/messages` to receive
 | `RUST_LOG` | `info` | logs on stderr |
 
 Data layout: `accounts/<alias>/session.db` (whatsmeow keys), `store.db` (messages,
-contacts, groups), `media/` (downloaded files), `lock`; `serve.sock` at the root while a
+contacts, groups), `media/` (downloaded files), `lock`; `run/serve.sock` while a
 `serve` instance runs.
 
 ## Security and privacy

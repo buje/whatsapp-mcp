@@ -6,15 +6,15 @@
 //! clients sur la même session se déconnectent mutuellement).
 //!
 //! Plutôt que de s'arrêter, les instances suivantes deviennent des relais :
-//! celle qui tient les verrous écoute sur `serve.sock` dans le répertoire de
-//! données, les autres s'y branchent et y recopient leur stdio. Chaque
+//! celle qui tient les verrous écoute sur `run/serve.sock` dans le répertoire
+//! de données, les autres s'y branchent et y recopient leur stdio. Chaque
 //! connexion est servie par son propre `WaServer` au-dessus du même bridge et
 //! de la même base : une seule session WhatsApp, autant d'hôtes que voulu.
 //!
 //! Quand l'instance principale s'arrête, ses relais perdent leur socket et
 //! sortent ; l'hôte les relance et l'un d'eux reprend les verrous.
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -31,14 +31,17 @@ const CONNECT_RETRY: Duration = Duration::from_millis(250);
 /// Un relais qui ne se présente pas dans ce délai est éconduit.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Le socket vit dans `run/`, un répertoire en 0700 : il n'est jamais
+/// joignable par un autre utilisateur, pas même entre `bind` et `chmod`.
 pub fn socket_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("serve.sock")
+    data_dir.join("run").join("serve.sock")
 }
 
 /// Ouvre le socket de partage. À n'appeler qu'en tenant les verrous des
 /// comptes : un socket resté d'un process tué est alors forcément orphelin.
 pub fn bind(data_dir: &Path) -> Result<UnixListener> {
-    let path = socket_path(data_dir);
+    let dir = private_dir(&data_dir.join("run"))?;
+    let path = dir.join("serve.sock");
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -46,10 +49,29 @@ pub fn bind(data_dir: &Path) -> Result<UnixListener> {
     }
     let listener =
         UnixListener::bind(&path).with_context(|| format!("écoute sur {}", path.display()))?;
-    // Réservé à l'utilisateur, comme les bases à côté.
+    // Ceinture et bretelles : le répertoire suffit déjà à fermer l'accès.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("droits de {}", path.display()))?;
     Ok(listener)
+}
+
+/// Crée `dir` en 0700, ou le ramène à 0700 s'il existe. Refuse un lien
+/// symbolique : on ne suit pas un chemin posé par quelqu'un d'autre.
+fn private_dir(dir: &Path) -> Result<PathBuf> {
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let meta = std::fs::symlink_metadata(dir)
+                .with_context(|| format!("lecture de {}", dir.display()))?;
+            if !meta.is_dir() {
+                bail!("{} existe et n'est pas un répertoire", dir.display());
+            }
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("droits de {}", dir.display()))?;
+        }
+        Err(e) => return Err(e).with_context(|| format!("création de {}", dir.display())),
+    }
+    Ok(dir.to_path_buf())
 }
 
 /// Côté principal : lit la présentation d'un relais. Rend les deux moitiés du
@@ -125,12 +147,19 @@ mod tests {
     #[tokio::test]
     async fn presentation_du_relais() {
         let dir = std::env::temp_dir().join(format!("wa-share-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap_or_default();
+        // Un `run/` trop ouvert (ancienne version, umask large) est resserré.
+        std::fs::create_dir_all(dir.join("run")).unwrap_or_default();
+        std::fs::set_permissions(dir.join("run"), std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_default();
         let listener = bind(&dir).unwrap_or_else(|e| panic!("bind : {e}"));
         let mode = std::fs::metadata(socket_path(&dir))
             .map(|m| m.permissions().mode() & 0o777)
             .unwrap_or_default();
         assert_eq!(mode, 0o600);
+        let dir_mode = std::fs::metadata(dir.join("run"))
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or_default();
+        assert_eq!(dir_mode, 0o700);
 
         for (sent, expected) in [
             ("read-only", Some(true)),

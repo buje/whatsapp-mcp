@@ -37,8 +37,9 @@ pub struct WaServer {
     // RwLock : lu à chaque appel d'outil, écrit seulement à l'appairage, jamais
     // tenu pendant un `.await`.
     accounts: parking_lot::RwLock<Vec<AccountAlias>>,
-    /// Verrous des comptes appairés depuis MCP (ceux du démarrage sont tenus par `main`).
-    locks: parking_lot::Mutex<Vec<std::fs::File>>,
+    /// Verrous des comptes appairés depuis MCP (ceux du démarrage sont tenus par
+    /// `main`). Partagés avec l'instance : voir `with_shared`.
+    locks: crate::lock::Held,
     tz: TimeZone,
     /// Partagé entre les connexions d'une même instance : la limite vaut par compte.
     limiter: std::sync::Arc<write::SendLimiter>,
@@ -69,7 +70,7 @@ impl WaServer {
             store,
             data_dir,
             accounts: parking_lot::RwLock::new(accounts),
-            locks: parking_lot::Mutex::new(Vec::new()),
+            locks: crate::lock::Held::default(),
             tz: TimeZone::system(),
             limiter: std::sync::Arc::default(),
             updates,
@@ -79,10 +80,16 @@ impl WaServer {
         }
     }
 
-    /// Fait compter les envois de ce serveur avec ceux des autres connexions
-    /// de l'instance (voir `share`).
-    pub fn with_limiter(mut self, limiter: std::sync::Arc<SendLimiter>) -> WaServer {
+    /// Rattache ce serveur à l'état de l'instance qu'il sert, pour qu'il survive
+    /// à la connexion (voir `share`) : limite d'envoi commune, et verrous des
+    /// comptes appairés tenus par l'instance plutôt que par la connexion.
+    pub fn with_shared(
+        mut self,
+        limiter: std::sync::Arc<SendLimiter>,
+        locks: crate::lock::Held,
+    ) -> WaServer {
         self.limiter = limiter;
+        self.locks = locks;
         self
     }
 

@@ -153,6 +153,7 @@ async fn main() -> Result<()> {
         // Nouvelles de chaque discussion, pour les abonnements MCP.
         let (updates, _) = tokio::sync::broadcast::channel(1024);
         let limiter = std::sync::Arc::<mcp::SendLimiter>::default();
+        let held = lock::Held::default();
         let server = mcp::WaServer::new(
             data_dir.clone(),
             handle.clone(),
@@ -161,7 +162,7 @@ async fn main() -> Result<()> {
             read_only,
             updates.clone(),
         )
-        .with_limiter(limiter.clone());
+        .with_shared(limiter.clone(), held.clone());
         server.open_databases().await?;
         // Les autres instances `serve` lancées sur ces comptes nous rejoignent ici.
         #[cfg(unix)]
@@ -176,6 +177,7 @@ async fn main() -> Result<()> {
                     store.clone(),
                     updates.clone(),
                     limiter.clone(),
+                    held.clone(),
                 ))),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "partage désactivé : les autres hôtes MCP ne pourront pas rejoindre cette instance");
@@ -511,6 +513,7 @@ async fn serve_shared(
     store: Store,
     updates: tokio::sync::broadcast::Sender<ingest::ChatUpdate>,
     limiter: std::sync::Arc<mcp::SendLimiter>,
+    held: lock::Held,
 ) {
     // Les connexions vivent dans ce JoinSet : quand l'instance s'arrête et
     // abandonne cette tâche, elles tombent avec, et leurs relais sortent aussitôt.
@@ -528,12 +531,13 @@ async fn serve_shared(
                 continue;
             }
         };
-        let (data_dir, handle, store, updates, limiter) = (
+        let (data_dir, handle, store, updates, limiter, held) = (
             data_dir.clone(),
             handle.clone(),
             store.clone(),
             updates.clone(),
             limiter.clone(),
+            held.clone(),
         );
         connections.spawn(async move {
             let served = async {
@@ -542,7 +546,7 @@ async fn serve_shared(
                 let accounts = discover(&data_dir)?;
                 let server =
                     mcp::WaServer::new(data_dir, handle, store, accounts, read_only, updates)
-                        .with_limiter(limiter);
+                        .with_shared(limiter, held);
                 server.open_databases().await?;
                 use rmcp::ServiceExt as _;
                 let service = server
