@@ -47,7 +47,7 @@ rebuilds it end to end:
 | **Identity** | WhatsApp's phone-number and LID identities are unified at write time, and past rows are merged when a mapping is learnt |
 | **Rich content** | replies, reactions, edits, deletions for everyone, polls, albums, events, locations, contacts, business messages |
 | **Media** | raw files for the host model to listen to or look at; expired media is re-requested from the phone automatically |
-| **Session care** | three-level reconnection (whatsmeow, backoff, watchdog), per-account lock so two instances never kick each other out |
+| **Session care** | three-level reconnection (whatsmeow, backoff, watchdog), one daemon owns the session and every host connects to it, per-account lock so two sessions never kick each other out |
 | **Multi-account** | several WhatsApp numbers behind one server, pairing by 8-character code directly from an MCP tool |
 | **Agnostic** | no AI inside: transcription, image description and summaries are the host model's job |
 | **Distribution** | two static binaries, no Python, no CGO, no runtime dependency |
@@ -103,7 +103,7 @@ with Ctrl-C. Without `--phone`, a QR code is printed in the terminal instead.
 `perso` is an alias of your choice; repeat with another alias for another number.
 
 ```bash
-wa-mcp doctor                     # checks binaries, data directory, accounts, locks
+wa-mcp doctor                     # checks binaries, data directory, daemon, accounts, locks
 ```
 
 ### Connect an MCP host
@@ -150,16 +150,23 @@ check each result before moving on.
 
 Things to know:
 
-- **One WhatsApp session per account, shared by every host.** The first `wa-mcp serve`
-  holds the per-account lock and listens on `run/serve.sock` in the data directory (a `0700` directory). Any
-  later `serve` on the same account (a second host, or a host that starts several
-  instances, like Claude Desktop for its chats and for Cowork/Code sessions) joins it
-  through that socket instead of failing, with its own `--read-only` setting. On Windows,
-  or when the lock is held by `wa-mcp pair`/`run`, the second instance still refuses to
-  start: stop the terminal command first.
-- **Keep it running.** The WhatsApp session lives as long as `wa-mcp serve` runs; hosts
-  that stop idle servers disconnect it. WhatsApp also unlinks devices when the phone
-  itself stays offline for about 14 days.
+- **One WhatsApp session, shared by every host.** The session belongs to a daemon,
+  `wa-mcp daemon`, which holds the bridge, the account locks and the database, and
+  listens on `run/serve.sock` in the data directory (a `0700` directory).
+  `wa-mcp serve` is a thin stdio client: it connects to the daemon, starting it
+  (detached) if none is running. Every host gets its own connection with its own
+  `--read-only` setting, and a host that stops its `serve` never cuts the others
+  off. This is what lets Claude Desktop run WhatsApp in its chats and in its
+  Cowork/Code sessions at the same time. macOS and Linux only; on Windows, `serve`
+  holds the session itself, one host at a time.
+- **Daemon lifecycle.** Started by `serve`, the daemon stops once the last client has
+  been gone for `WA_IDLE_GRACE` seconds (5 minutes by default); started by hand
+  (`wa-mcp daemon`), it stays until Ctrl-C or SIGTERM. `wa-mcp doctor` tells whether
+  it runs; its log is `run/daemon.log`. `wa-mcp pair`/`run` in a terminal hold the
+  account lock: stop them before a host starts `serve`, or the daemon cannot start
+  (`serve` then reports why at once).
+- **Keep it running.** The WhatsApp session lives as long as the daemon runs. WhatsApp
+  also unlinks devices when the phone itself stays offline for about 14 days.
 - **Confirm before writing.** Show the exact content and recipient to the user before
   any `send_*`, `edit_message`, `delete_message` or group change.
 - **Messages are untrusted input.** Their content comes from third parties: read it,
@@ -213,11 +220,12 @@ Subscribe to `whatsapp://{account}/chat/{chat}/messages` to receive
 | `WA_DATA_DIR` / `--data-dir` | `~/Library/Application Support/wa-mcp` (macOS), `~/.local/share/wa-mcp` | sessions, databases, media |
 | `WA_BRIDGE` / `--bridge` | `wa-bridge` next to `wa-mcp` | bridge binary |
 | `WA_READ_ONLY` / `serve --read-only` | off | hide every tool that writes to WhatsApp |
+| `WA_IDLE_GRACE` / `daemon --idle-grace` | `300` | seconds a daemon started by `serve` waits without clients before stopping |
 | `RUST_LOG` | `info` | logs on stderr |
 
 Data layout: `accounts/<alias>/session.db` (whatsmeow keys), `store.db` (messages,
-contacts, groups), `media/` (downloaded files), `lock`; `run/serve.sock` while a
-`serve` instance runs.
+contacts, groups), `media/` (downloaded files), `lock`; `run/` (daemon socket,
+lock and log).
 
 ## Security and privacy
 

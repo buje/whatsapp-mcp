@@ -174,6 +174,13 @@ impl WaServer {
     }
 }
 
+/// Le serveur d'une connexion disparaît avec elle : ses tâches aussi.
+impl Drop for WaServer {
+    fn drop(&mut self) {
+        self.subs.lock().stop_notifier();
+    }
+}
+
 #[rmcp::tool_handler(router = self.tool_router)]
 #[rmcp::prompt_handler(router = self.prompt_router)]
 impl ServerHandler for WaServer {

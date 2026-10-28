@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`wa-mcp daemon`**: owns the WhatsApp session (bridge, account locks, database)
+  and listens on `run/serve.sock`, a `0700` directory in the data directory. One
+  daemon per data directory (`run/daemon.lock`). Started by hand it stays until
+  Ctrl-C or SIGTERM; started by `serve` (`--idle-exit`) it stops once the last
+  client has been gone for `WA_IDLE_GRACE` seconds (300 by default). Log in
+  `run/daemon.log`; `doctor` reports whether it runs.
+
+### Changed
+
+- **`wa-mcp serve` is a thin stdio client of the daemon** on macOS and Linux: it
+  connects to `run/serve.sock`, starting the daemon (detached, own process group) if
+  none listens. Several hosts, or one host starting several instances (Claude
+  Desktop for its chats and for Cowork/Code sessions), now share one WhatsApp
+  session instead of the second failing on the account lock, and stopping one host
+  no longer affects the others. Each client keeps its own `--read-only`; the send
+  limit (20/min per account) and the locks of accounts paired through MCP belong to
+  the daemon. If the daemon cannot start (account held by `pair`/`run`), `serve`
+  says why at once. Windows keeps the previous in-process `serve`.
+
+### Fixed
+
+- The `resources/subscribe` notification task outlived its connection; it now stops
+  with it.
+
 ## [0.1.1] - 2026-09-30
 
 ### Fixed
