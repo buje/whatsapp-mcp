@@ -28,6 +28,32 @@
 - The `resources/subscribe` notification task outlived its connection; it now stops
   with it.
 
+## [0.1.3] - 2026-11-09
+
+### Fixed
+
+- Initial history could be lost when pairing a large account: the bridge's own
+  SQLite connections to `session.db` contended (`database is locked`), and messages
+  whose decryption failed this way were dropped. Transactions now take the write
+  lock at `BEGIN` (`_txlock=immediate`) and wait their turn instead of failing.
+
+## [0.1.2] - 2026-11-09
+
+### Fixed
+
+- Messages sent into a chat with disappearing messages were permanent: recipients
+  saw "This message won't disappear, the sender may be on an old version of
+  WhatsApp". The disappearing timer of each chat is now tracked (history sync, live
+  messages, group info; existing databases are backfilled from the last message)
+  and set on every outgoing text, media, location and poll.
+
+### Changed
+
+- whatsmeow bumped to `79dc2a8c33df` (2026-11-07), vendored `.proto` files resynced;
+  Go and Rust dependencies updated.
+- Weekly automated whatsmeow update PR (`.github/workflows/whatsmeow.yml`) and
+  Dependabot for the other Go, Cargo, Actions and Docker dependencies.
+
 ## [0.1.1] - 2026-09-30
 
 ### Fixed
